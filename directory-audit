@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# ==============================================================================
+# STRATEGIC OBJECTIVE: Writable Directory Auditor & Staging Area Hunter
+# TTP FOCUS: T1059 (Command and Scripting Interpreter), T1074 (Data Staged)
+# ==============================================================================
+# Emulates a threat hunter identifying locations where external threat actors
+# or local unprivileged users could drop implants, web shells, or rootkits.
+# ==============================================================================
+
+set -euo pipefail
+
+# --- Color Matrix for Terminal Aesthetics ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# --- Initialization Header ---
+echo -e "${BLUE}${BOLD}======================================================================"
+echo -e "          [!] SECURITY AUDIT: WORLD-WRITABLE DIRECTORY HUNTER         "
+echo -e "======================================================================${NC}"
+echo -e "${CYAN}[*] Target Host:${NC} $(hostname)"
+echo -e "${CYAN}[*] Active User:${NC} $(whoami)"
+echo -e "${CYAN}[*] Timestamp:${NC}   $(date '+%Y-%m-%d %H:%M:%S UTC')"
+echo -e "${BLUE}----------------------------------------------------------------------${NC}"
+
+# --- Operational Virtual Filesystem Exclusions ---
+# Paths like /proc and /sys represent dynamic kernel states, generating false positives.
+EXCLUDED_PATHS=(
+    "/proc"
+    "/sys"
+    "/dev"
+    "/run"
+    "/snap"
+    "/var/lib/docker"
+)
+
+# Build the dynamic 'find' exclusion string
+PRUNE_ARGS=()
+for path in "${EXCLUDED_PATHS[@]}"; do
+    if [ ${#PRUNE_ARGS[@]} -eq 0 ]; then
+        PRUNE_ARGS+=("-path" "$path")
+    else
+        PRUNE_ARGS+=("-o" "-path" "$path")
+    fi
+done
+
+echo -e "${ORANGE}[*] Pruning high-noise filesystems...${NC}"
+for p in "${EXCLUDED_PATHS[@]}"; do echo -e "    -> Skipping: $p"; done
+echo -e "${BLUE}----------------------------------------------------------------------${NC}"
+
+# --- Setup Output Report Architecture ---
+REPORT_FILE="writable_directories_report_$(date +%Y%m%d).log"
+cat << EOF > "$REPORT_FILE"
+======================================================================
+WORLD-WRITABLE DIRECTORIES DISCOVERY REPORT
+Generated: $(date)
+Host: $(hostname)
+======================================================================
+DIRECTORY | OWNER | GROUP | NO-EXECUTE PROTECTION STATUS
+----------------------------------------------------------------------
+EOF
+
+echo -e "${GREEN}[+] Commencing file system traversal. Please stand by...${NC}\n"
+
+# Formulate the header for live terminal tracking
+printf "${BOLD}%-45s %-12s %-12s %-10s${NC}\n" "TARGET PATH" "OWNER" "GROUP" "EXECUTE-BIT"
+printf "%-45s %-12s %-12s %-10s\n" "-----------" "-----" "----" "-----------"
+
+# --- Core Logic & Traversal Loop ---
+# Prunes excluded paths, finds world-writable (-perm -0002) directories, and pipes to processing
+find / \( "${PRUNE_ARGS[@]}" \) -prune -o -type d -perm -0002 -print 2>/dev/null | while read -r dir; do
+    
+    # Retrieve metadata safely using stat
+    # %U=Owner, %G=Group, %A=Human-readable permissions string
+    if ! metadata=$(stat -c "%U:%G:%A" "$dir" 2>/dev/null); then
+        continue # Skip directory if read permissions were lost mid-scan
+    fi
+    
+    owner=$(echo "$metadata" | cut -d':' -f1)
+    group=$(echo "$metadata" | cut -d':' -f2)
+    perms=$(echo "$metadata" | cut -d':' -f3)
+    
+    # Assess vulnerability risk layer: Check if the world-executable bit 'x' is active
+    # Threat actors prefer executable directories to run dropped binaries directly.
+    if [[ "${perms:8:1}" == "x" ]]; then
+        exec_status="RISK [EXEC ALLOWED]"
+        color_status="${RED}${BOLD}${exec_status}${NC}"
+    else
+        exec_status="RESTRICTED [NO-EXEC]"
+        color_status="${GREEN}${exec_status}${NC}"
+    fi
+
+    # Truncate paths that are too long for terminal visual formatting
+    display_dir="$dir"
+    if [ ${#display_dir} -gt 42 ]; then
+        display_dir="...${dir: -39}"
+    fi
+
+    # Live telemetry output
+    printf "%-45s %-12s %-12s %-10s\n" "$display_dir" "$owner" "$group" "$color_status"
+    
+    # Write flat data to hard-copy log file
+    echo "$dir | $owner | $group | $exec_status" >> "$REPORT_FILE"
+done
+
+# --- Finalization & Triage Instructions ---
+echo -e "${BLUE}----------------------------------------------------------------------${NC}"
+echo -e "${GREEN}[+] Audit complete.${NC}"
+echo -e "${CYAN}[*] Master artifact saved to:${NC} ${BOLD}$REPORT_FILE${NC}"
+echo -e "${BLUE}----------------------------------------------------------------------${NC}"
+echo -e "${ORANGE}${BOLD}[!] IMMEDIATE TRIAGE STEPS FOR DETECTORS:${NC}"
+echo -e "    1. Audit directories tagged with ${RED}[EXEC ALLOWED]${NC}."
+echo -e "    2. Consider mounting non-OS staging volumes (like /tmp or /var/tmp) with 'noexec' in /etc/fstab."
+echo -e "    3. Deploy File Integrity Monitoring (FIM) or auditd rules to monitor writes to these paths."
